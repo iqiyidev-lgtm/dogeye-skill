@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""
+DogEye Data Skill CLI
+调用 api.leilei.uk 获取实时市场数据
+"""
+
+import os
+import sys
+import json
+import argparse
+import requests
+from datetime import datetime
+
+API_BASE = "https://api.leilei.uk"
+
+def get_user_id():
+    """获取用户ID"""
+    return os.getenv("DOGEYE_USER_ID", f"oc_{os.getpid()}")
+
+def api_call(endpoint, params=None):
+    """调用 API"""
+    if params is None:
+        params = {}
+    
+    user_id = get_user_id()
+    params["user_id"] = user_id
+    
+    url = f"{API_BASE}{endpoint}"
+    
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ API 请求失败: {e}")
+        sys.exit(1)
+
+def format_number(n):
+    """格式化数字"""
+    n = float(n)
+    if abs(n) >= 1e9:
+        return f"{n/1e9:.2f}B"
+    elif abs(n) >= 1e6:
+        return f"{n/1e6:.2f}M"
+    elif abs(n) >= 1e3:
+        return f"{n/1e3:.1f}K"
+    return f"{n:.2f}"
+
+def cmd_block_trades(coin):
+    """大单交易"""
+    data = api_call(f"/v1/block-trades/{coin}")
+    
+    print(f"\n📊 {coin} 大单交易")
+    print("=" * 50)
+    
+    if "contract" in data.get("data", {}):
+        c = data["data"]["contract"]
+        print(f"\n🔄 合约市场:")
+        print(f"  1H 买入: ${format_number(c.get('buy_1h', 0))}")
+        print(f"  1H 卖出: ${format_number(c.get('sell_1h', 0))}")
+        net = c.get('net_1h', 0)
+        emoji = "🟢" if net > 0 else "🔴"
+        print(f"  1H 净流: {emoji} ${format_number(net)}")
+        print(f"  24H 总成交: ${format_number(c.get('total_24h', 0))}")
+    
+    if "spot" in data.get("data", {}):
+        s = data["data"]["spot"]
+        print(f"\n💰 现货市场:")
+        print(f"  1H 买入: ${format_number(s.get('buy_1h', 0))}")
+        print(f"  1H 卖出: ${format_number(s.get('sell_1h', 0))}")
+        net = s.get('net_1h', 0)
+        emoji = "🟢" if net > 0 else "🔴"
+        print(f"  1H 净流: {emoji} ${format_number(net)}")
+    
+    print(f"\n💾 缓存: {'是' if data.get('cached') else '否'}")
+
+def cmd_fund_flow(coin, period="1D"):
+    """资金流"""
+    data = api_call(f"/v1/fund-flow/{coin}", {"period": period})
+    
+    print(f"\n💸 {coin} 资金流 ({period})")
+    print("=" * 50)
+    
+    spot = data.get("data", {}).get("spot", {})
+    contract = data.get("data", {}).get("contract", {})
+    
+    if spot.get("list"):
+        latest = spot["list"][0]
+        net = float(latest.get("net_flow", 0))
+        emoji = "🟢 流入" if net > 0 else "🔴 流出"
+        print(f"\n📈 现货最新 ({latest.get('time_interval')}):")
+        print(f"  流入: ${format_number(latest.get('inflow', 0))}")
+        print(f"  流出: ${format_number(latest.get('outflow', 0))}")
+        print(f"  净流: {emoji} ${format_number(net)}")
+    
+    if contract.get("list"):
+        latest = contract["list"][0]
+        net = float(latest.get("net_flow", 0))
+        emoji = "🟢 流入" if net > 0 else "🔴 流出"
+        print(f"\n📉 合约最新 ({latest.get('time_interval')}):")
+        print(f"  流入: ${format_number(latest.get('inflow', 0))}")
+        print(f"  流出: ${format_number(latest.get('outflow', 0))}")
+        print(f"  净流: {emoji} ${format_number(net)}")
+
+def cmd_long_short(coin):
+    """多空比"""
+    data = api_call(f"/v1/long-short/{coin}")
+    
+    print(f"\n⚖️  {coin} 多空比")
+    print("=" * 50)
+    
+    items = data.get("data", [])
+    
+    # 找全网数据
+    all_data = None
+    for item in items:
+        if item.get("exchange") == "ALL_BEFORE":
+            all_data = item
+            break
+    
+    if all_data:
+        long_r = float(all_data.get("long_ratio", 0))
+        short_r = float(all_data.get("short_ratio", 0))
+        ratio = all_data.get("long_short_ratio", 1.0)
+        
+        print(f"\n🌐 全网多空比:")
+        print(f"  多头: {long_r:.1f}%")
+        print(f"  空头: {short_r:.1f}%")
+        print(f"  比值: {ratio:.2f}")
+        print(f"  情绪: {all_data.get('sentiment', 'N/A')}")
+    
+    # 显示主要交易所
+    print(f"\n🏢 主要交易所:")
+    for item in items[:5]:
+        ex = item.get("exchange", "N/A")
+        if ex == "ALL_BEFORE":
+            continue
+        long_r = float(item.get("long_ratio", 0))
+        short_r = float(item.get("short_ratio", 0))
+        print(f"  {ex:12s} 多{long_r:.1f}% / 空{short_r:.1f}%")
+
+def cmd_funding(coin):
+    """资金费率"""
+    data = api_call(f"/v1/funding-rate/{coin}")
+    
+    print(f"\n💰 {coin} 资金费率")
+    print("=" * 50)
+    
+    rates = data.get("data", {}).get("rates", {}).get("data", [])
+    
+    print(f"\n📊 主要交易所费率:")
+    for item in rates[:10]:
+        ex = item.get("exchange", "N/A")
+        contract = item.get("contract_type", "N/A")
+        rate = item.get("funding_rate", "N/A")
+        signal = item.get("funding_signal", "N/A")
+        
+        # 简化显示
+        if "USDT" in contract:
+            emoji = "🟢" if "long" in signal else "🔴" if "short" in signal else "⚪"
+            print(f"  {emoji} {ex:12s} {rate:10s} ({signal})")
+
+def cmd_fear_greed():
+    """恐惧贪婪指数"""
+    data = api_call("/v1/fear-greed")
+    
+    print(f"\n😨 恐惧贪婪指数")
+    print("=" * 50)
+    
+    d = data.get("data", {})
+    value = d.get("value", 0)
+    classification = d.get("classification", "N/A")
+    
+    # 根据值显示不同表情
+    if value <= 20:
+        emoji = "😱"
+    elif value <= 40:
+        emoji = "😰"
+    elif value <= 60:
+        emoji = "😐"
+    elif value <= 80:
+        emoji = "😊"
+    else:
+        emoji = "🤩"
+    
+    print(f"\n{emoji} 当前指数: {value}")
+    print(f"   状态: {classification}")
+    print(f"\n💡 解读:")
+    if value <= 20:
+        print("   市场极度恐慌，可能是买入机会")
+    elif value >= 80:
+        print("   市场极度贪婪，注意风险")
+    else:
+        print("   市场情绪中性")
+
+def cmd_quota():
+    """查询配额"""
+    user_id = get_user_id()
+    data = api_call(f"/v1/quota/{user_id}")
+    
+    print(f"\n📊 账户配额")
+    print("=" * 50)
+    
+    b = data.get("balance", {})
+    print(f"\n👤 用户: {data.get('user_id')}")
+    print(f"   每日限额: {b.get('daily_quota')} 次")
+    print(f"   今日已用: {b.get('used_today')} 次")
+    print(f"   剩余免费: {b.get('remaining_free')} 次")
+    print(f"   今日扣费: {b.get('charged_today')} USDT")
+    
+    print(f"\n💰 价格表:")
+    pricing = b.get("pricing", {})
+    for k, v in pricing.items():
+        print(f"   {k:20s}: {v} USDT")
+
+def cmd_rsi_heatmap(coins, timeframe):
+    """RSI热力图"""
+    params = {"coins": coins, "timeframe": timeframe}
+    data = api_call("/v1/rsi-heatmap", params)
+    
+    print(f"\n📊 RSI 热力图 ({timeframe})")
+    print("=" * 50)
+    
+    rsi_data = data.get("data", {}).get("ris_data", {}).get("data", [])
+    
+    for item in rsi_data:
+        coin = item.get("coin_type", "N/A")
+        rsi_first = float(item.get("first_data", 0))
+        rsi_last = float(item.get("last_data", 0))
+        
+        # 根据 RSI 值显示不同颜色
+        if rsi_last >= 70:
+            status = "🔴 超买"
+        elif rsi_last <= 30:
+            status = "🟢 超卖"
+        else:
+            status = "⚪ 中性"
+        
+        trend = "📈" if rsi_last > rsi_first else "📉"
+        print(f"  {coin:6s} RSI: {rsi_last:.2f} {trend} {status}")
+
+def cmd_market_depth(coin):
+    """市场深度"""
+    data = api_call(f"/v1/market-depth/{coin}")
+    
+    print(f"\n📈 {coin} 市场深度 (前100档)")
+    print("=" * 50)
+    
+    exchanges = data.get("data", {}).get("exchanges", {})
+    
+    for ex_name, ex_data in exchanges.items():
+        if "error" in ex_data:
+            print(f"\n🏢 {ex_name.upper()}: 数据获取失败")
+            continue
+        
+        bids = ex_data.get("bids_100", 0)
+        asks = ex_data.get("asks_100", 0)
+        ratio = ex_data.get("bid_ask_ratio", 0)
+        
+        # 判断买卖力量
+        if ratio > 1.5:
+            sentiment = "🟢 买盘强势"
+        elif ratio > 1.1:
+            sentiment = "🟡 买盘占优"
+        elif ratio < 0.7:
+            sentiment = "🔴 卖盘强势"
+        elif ratio < 0.9:
+            sentiment = "🟠 卖盘占优"
+        else:
+            sentiment = "⚪ 相对平衡"
+        
+        print(f"\n🏢 {ex_name.upper()}")
+        print(f"  买盘: {format_number(bids)} | 卖盘: {format_number(asks)}")
+        print(f"  买卖比: {ratio:.2f} {sentiment}")
+
+def cmd_grayscale(coin):
+    """灰度持仓"""
+    data = api_call(f"/v1/grayscale/{coin}")
+    
+    print(f"\n🏛️  {coin} 灰度持仓")
+    print("=" * 50)
+    
+    d = data.get("data", {})
+    hold = d.get("latest_hold", 0)
+    change_1d = d.get("change_1d", 0)
+    change_7d = d.get("change_7d", 0)
+    
+    print(f"\n📊 最新持仓: {hold:,.2f} {coin}")
+    
+    # 1日变化
+    if change_1d < 0:
+        print(f"   1日变化: 🔴 {change_1d:,.2f} (减持)")
+    else:
+        print(f"   1日变化: 🟢 +{change_1d:,.2f} (增持)")
+    
+    # 7日变化
+    if change_7d < 0:
+        print(f"   7日变化: 🔴 {change_7d:,.2f} (减持)")
+    else:
+        print(f"   7日变化: 🟢 +{change_7d:,.2f} (增持)")
+    
+    print(f"\n📅 更新时间: {d.get('update_time', 'N/A')}")
+
+def cmd_etf(coin):
+    """ETF数据"""
+    data = api_call(f"/v1/etf/{coin}")
+    
+    print(f"\n📈 {coin} ETF 数据")
+    print("=" * 50)
+    
+    d = data.get("data", {})
+    overview = d.get("overview", {})
+    
+    print(f"\n💰 概览:")
+    print(f"   总净流入: ${format_number(float(overview.get('total_net_inflow', 0)))}")
+    print(f"   日净流入: {overview.get('daily_net_inflow', 'N/A')}")
+    print(f"   日交易量: ${format_number(float(overview.get('daily_trading_volume', 0)))}")
+    print(f"   总资产: ${format_number(float(overview.get('total_net_assets', 0)))}")
+    print(f"   持仓机构: {d.get('holdings_count', 0)} 家")
+    
+    print(f"\n🏆 主要 ETF:")
+    for holding in d.get("top_holdings", [])[:5]:
+        ticker = holding.get("ticker", "N/A")
+        name = holding.get("name", "N/A")
+        aum = float(holding.get("aum", 0))
+        change = holding.get("price_change_percent", "N/A")
+        
+        print(f"   {ticker.upper():8s} {name[:25]:25s} AUM: ${format_number(aum)} ({change}%)")
+
+def main():
+    parser = argparse.ArgumentParser(description="DogEye Data Skill")
+    subparsers = parser.add_subparsers(dest="command", help="命令")
+    
+    # block-trades
+    p1 = subparsers.add_parser("block-trades", help="查询大单交易")
+    p1.add_argument("coin", help="币种 (BTC, ETH, etc.)")
+    
+    # fund-flow
+    p2 = subparsers.add_parser("fund-flow", help="查询资金流")
+    p2.add_argument("coin", help="币种")
+    p2.add_argument("--period", default="1D", help="周期 (5M, 1H, 1D)")
+    
+    # long-short
+    p3 = subparsers.add_parser("long-short", help="查询多空比")
+    p3.add_argument("coin", help="币种")
+    
+    # funding
+    p4 = subparsers.add_parser("funding", help="查询资金费率")
+    p4.add_argument("coin", help="币种")
+    
+    # fear-greed
+    p5 = subparsers.add_parser("fear-greed", help="查询恐惧贪婪指数")
+    
+    # quota
+    p6 = subparsers.add_parser("quota", help="查询账户配额")
+    
+    # rsi-heatmap (新增)
+    p7 = subparsers.add_parser("rsi-heatmap", help="查询RSI热力图")
+    p7.add_argument("--coins", default="BTC,ETH,SOL", help="币种列表，逗号分隔")
+    p7.add_argument("--timeframe", default="1H", help="周期 (15M, 1H, 4H, 1D)")
+    
+    # market-depth (新增)
+    p8 = subparsers.add_parser("market-depth", help="查询市场深度")
+    p8.add_argument("coin", help="币种")
+    
+    # grayscale (新增)
+    p9 = subparsers.add_parser("grayscale", help="查询灰度持仓")
+    p9.add_argument("coin", help="币种 (BTC, ETH)")
+    
+    # etf (新增)
+    p10 = subparsers.add_parser("etf", help="查询ETF数据")
+    p10.add_argument("coin", help="币种 (btc, eth)")
+    
+    args = parser.parse_args()
+    
+    if args.command == "block-trades":
+        cmd_block_trades(args.coin)
+    elif args.command == "fund-flow":
+        cmd_fund_flow(args.coin, args.period)
+    elif args.command == "long-short":
+        cmd_long_short(args.coin)
+    elif args.command == "funding":
+        cmd_funding(args.coin)
+    elif args.command == "fear-greed":
+        cmd_fear_greed()
+    elif args.command == "quota":
+        cmd_quota()
+    elif args.command == "rsi-heatmap":
+        cmd_rsi_heatmap(args.coins, args.timeframe)
+    elif args.command == "market-depth":
+        cmd_market_depth(args.coin)
+    elif args.command == "grayscale":
+        cmd_grayscale(args.coin)
+    elif args.command == "etf":
+        cmd_etf(args.coin)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
