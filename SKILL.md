@@ -104,10 +104,6 @@ export DOGEYE_USER_ID="your_user_id"
 /dogeye quota
 ```
 
-## API 来源
-
-数据来自 DogEye API Gateway: https://api.leilei.uk
-
 ## 计费
 
 - 每日免费额度：100 次调用
